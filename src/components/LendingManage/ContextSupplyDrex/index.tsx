@@ -9,20 +9,25 @@ import {
   useApproveDREX,
 } from "@/hooks/useErc20";
 import {
-  getSupplyInterestRate,
+  useGetSupplyInterestRate,
+  useGetReserveFactor,
   useGetSuppliedDREX,
+  useGetUnitValue,
   useSupplyDREX,
   useWithdrawDREX,
   useFlashLiquidateBorrow,
-  hasRole,
+  useHasRole,
 } from "@/hooks/useRBLLPoolContract";
+import { fromUnits, toUnits, unitsToInput } from "@/hooks/useTx";
 import { BigNumberish } from "ethers";
 import Image from "next/image";
-import { useEffect, useState } from "react";
+import { useState } from "react";
 import { BORROWER, POOL_MANAGER_ROLE } from "@/constant/roles";
-import { useWaitForTransaction } from "wagmi";
-import ToastNotification from "@/components/Toast";
 import { useToastStore } from "@/stores/toast";
+
+// Headroom for the Uniswap fee and price impact when selling TSELIC in a recall.
+const RECALL_SLIPPAGE_BPS = 500n;
+
 export const ContextSupplyDrex = ({
   address,
   dataTotalSupplied,
@@ -32,194 +37,79 @@ export const ContextSupplyDrex = ({
   dataTotalSupplied: BigNumberish;
   dataTotalBorrowed: BigNumberish;
 }) => {
-  const {
-    data: dataAllowanceDREX,
-    isError: isErrorAllowanceDREX,
-    isLoading: isLoadingAllowanceDREX,
-  } = useAllowanceDREX(address as EthereumAddress);
-
-  const [approvedAmountDREX, setApprovedAmountDREX] = useState(
-    Number(dataAllowanceDREX) / 10 ** 6
-  );
-
-  const {
-    data: dataDrexBalance,
-    isError: isDrexError,
-    isLoading: isLoadingDrex,
-  } = useBalanceOfDREX(address as EthereumAddress);
-
-  const formattedTotalSupply = (Number(dataTotalSupplied) / 10 ** 18).toFixed(
-    2
-  );
-
-  const formattedTotalBorrowed = (Number(dataTotalBorrowed) / 10 ** 18).toFixed(
-    2
-  );
-
-  const {
-    data: dataSuppliedDREX,
-    isError: isErrorSuppliedDREX,
-    isLoading: isLoadingSuppliedDREX,
-  } = useGetSuppliedDREX(address as EthereumAddress);
-
-  const { data: canRecall } = hasRole(
-    POOL_MANAGER_ROLE,
-    address as EthereumAddress
-  );
-
-  const drexBalance = Number(dataDrexBalance) / 10 ** 6;
-
   const [valueDREX, setValueDREX] = useState("");
   const [valueRBLL, setValueRBLL] = useState("");
-  const [error, setError] = useState("");
-  const [isLoading, setLoading] = useState(true);
-  const [isLoadingTx, setLoadingTx] = useState(false);
-  const [transactionHash, setTransactionHash] = useState<
-    EthereumAddress | undefined
-  >(undefined);
+  // Max withdraw goes through withdrawAllDREX so accrued interest isn't left behind.
+  const [isMaxWithdraw, setMaxWithdraw] = useState(false);
 
-  const {
-    write: writeApprove,
-    data: dataApprove,
-    isError: isErrorApprove,
-    isSuccess: isSuccessApprove,
-    isLoading: isLoadingApproval,
-  } = useApproveDREX();
+  const { data: dataAllowanceDREX } = useAllowanceDREX(address as EthereumAddress);
+  const { data: dataDrexBalance, isLoading: isLoadingDrex } = useBalanceOfDREX(
+    address as EthereumAddress
+  );
+  const { data: dataSuppliedDREX, isLoading: isLoadingSuppliedDREX } =
+    useGetSuppliedDREX(address as EthereumAddress);
+  const { data: canRecall } = useHasRole(POOL_MANAGER_ROLE, address);
+  const { data: dataUnitValue } = useGetUnitValue<bigint>();
+  const { data: dataReserveFactor } = useGetReserveFactor();
+  const { data: dataSupplyInterestRate, isLoading: isLoadingSupplyInterestRate } =
+    useGetSupplyInterestRate(dataTotalSupplied || 0, dataTotalBorrowed || 0);
 
-  const {
-    write: writeDeposit,
-    data: dataDeposit,
-    isError: isErrorDeposit,
-    isSuccess: isSuccessDeposit,
-    isLoading: isLoadingDeposit,
-  } = useSupplyDREX(Number(valueDREX) * 10 ** 6);
+  const isLoading = isLoadingDrex || isLoadingSupplyInterestRate || isLoadingSuppliedDREX;
 
-  const {
-    write: writeWithdrawal,
-    data: dataWithdrawal,
-    isError: isErrorWithdrawal,
-    isSuccess: isSucessWithdrawal,
-    isLoading: isLoadingWithDrawal,
-  } = useWithdrawDREX((Number(valueRBLL) * 10 ** 6).toFixed());
+  const drexBalance = fromUnits(dataDrexBalance, 6);
+  const suppliedDREX = fromUnits(dataSuppliedDREX, 18);
+  const formattedTotalSupply = fromUnits(dataTotalSupplied, 18);
+  const formattedTotalBorrowed = fromUnits(dataTotalBorrowed, 18);
+  const utilization =
+    formattedTotalSupply === 0 ? 0 : (formattedTotalBorrowed / formattedTotalSupply) * 100;
+  // Suppliers earn the utilization-scaled rate minus the protocol's reserve cut.
+  const supplyApr =
+    (Number(dataSupplyInterestRate || 0) / 1e6) *
+    (1 - Number(dataReserveFactor || 0) / 1e8);
 
-  const {
-    write: writeRecall,
-    data: dataRecall,
-    isError: isErrorRecall,
-    isSuccess: isSucessRecall,
-    isLoading: isLoadingRecall,
-  } = useFlashLiquidateBorrow(
+  const supplyAmount = toUnits(valueDREX, 6);
+  const rbllAmount = toUnits(valueRBLL, 6); // rBRLL redeems 1:1 for DREX (6 decimals)
+  const allowance = typeof dataAllowanceDREX === "bigint" ? dataAllowanceDREX : 0n;
+  const drexBalanceUnits = typeof dataDrexBalance === "bigint" ? dataDrexBalance : 0n;
+  const suppliedUnits =
+    typeof dataSuppliedDREX === "bigint" ? dataSuppliedDREX / 10n ** 12n : 0n;
+
+  // TSELIC needed to buy `rbllAmount` DREX at the oracle price, plus slippage.
+  const recallTselicMax =
+    typeof dataUnitValue === "bigint" && dataUnitValue > 0n
+      ? (rbllAmount * 10n ** 30n * (10_000n + RECALL_SLIPPAGE_BPS)) /
+        (dataUnitValue * 10_000n)
+      : 0n;
+
+  const { write: writeApprove, isLoading: isLoadingApproval } = useApproveDREX();
+  const { write: writeDeposit, isLoading: isLoadingDeposit } = useSupplyDREX(supplyAmount);
+  const { write: writeWithdrawal, isLoading: isLoadingWithDrawal } = useWithdrawDREX(
+    isMaxWithdraw ? "MAX" : rbllAmount
+  );
+  const { write: writeRecall, isLoading: isLoadingRecall } = useFlashLiquidateBorrow(
     BORROWER,
-    (Number(valueRBLL) * 10 ** 6).toFixed(),
-    4 * 10 ** 6
+    rbllAmount,
+    recallTselicMax
   );
 
-  const {
-    data: dataSupplyInterestRate,
-    isError: isErrorSupplyInterestRate,
-    isLoading: isLoadingSupplyInterestRate,
-  } = getSupplyInterestRate(dataTotalSupplied || 0, dataTotalBorrowed || 0);
-
-  const transaction = useWaitForTransaction({
-    hash: transactionHash,
-  });
-
-  useEffect(() => {
-    if (transaction.isSuccess) {
+  const overBalance = (value: bigint, limit: bigint) => {
+    if (value > limit) {
       useToastStore
         .getState()
-        .showToast("Transaction successfully completed", "success");
-    } else if (transaction.isError && transactionHash !== "0x") {
-      useToastStore
-        .getState()
-        .showToast(`Erro on TX: ${transaction.error}`, "error");
+        .showToast("The amount entered is greater than the current balance.", "error");
     }
-    setTransactionHash(undefined);
-    setLoadingTx(false);
-  }, [transaction.isSuccess, transaction.isError]);
+  };
 
-  useEffect(() => {
-    if (isSuccessApprove) {
-      setTransactionHash(dataApprove.hash);
-      setLoadingTx(true);
-      useToastStore
-        .getState()
-        .showToast("DREX approval successful", "success");
-    }
-    if (isErrorApprove) {
-      useToastStore.getState().showToast("Error approving DREX", "error");
-    }
-  }, [isErrorApprove, isSuccessApprove]);
+  const onRbllChange = (value: string) => {
+    setMaxWithdraw(false);
+    setValueRBLL(value);
+    overBalance(toUnits(value, 6), suppliedUnits);
+  };
 
-  useEffect(() => {
-    if (isSuccessApprove) {
-      setTransactionHash(dataRecall.hash);
-      setLoadingTx(true);
-      useToastStore
-        .getState()
-        .showToast("Successful approval", "success");
-    }
-    if (isErrorApprove) {
-      useToastStore.getState().showToast("Error approving DREX", "error");
-    }
-  }, [isErrorRecall, isSucessRecall]);
-
-  useEffect(() => {
-    if (isSucessWithdrawal) {
-      setTransactionHash(dataWithdrawal.hash);
-      setLoadingTx(true);
-      useToastStore.getState().showToast("Withdraw successful", "success");
-    }
-    if (isErrorWithdrawal) {
-      useToastStore.getState().showToast("Error when withdrawing DREX", "error");
-    }
-  }, [isErrorWithdrawal, isSucessWithdrawal]);
-
-  useEffect(() => {
-    if (isSuccessDeposit) {
-      setTransactionHash(dataDeposit.hash);
-      setLoadingTx(true);
-      useToastStore
-        .getState()
-        .showToast("Deposit successful", "success");
-    }
-    if (isErrorDeposit) {
-      useToastStore.getState().showToast("Error when depositing DREX", "error");
-    }
-  }, [isErrorDeposit, isSuccessDeposit]);
-
-  useEffect(() => {
-    if (Number(dataAllowanceDREX) !== approvedAmountDREX * 10 ** 6) {
-      setApprovedAmountDREX(Number(dataAllowanceDREX) / 10 ** 6);
-    }
-  }, [dataAllowanceDREX]);
-
-  useEffect(() => {
-    const loading = [
-      isLoadingDrex,
-      isLoadingSupplyInterestRate,
-      isLoadingSuppliedDREX,
-    ].every((loading) => loading === false);
-
-    setLoading(!loading);
-  }, [isLoadingDrex, isLoadingSupplyInterestRate, isLoadingSuppliedDREX]);
-
-  useEffect(() => {
-    if (error) {
-      useToastStore.getState().showToast(`${error}`, "error");
-    }
-
-    if (isLoadingTx) {
-      useToastStore
-        .getState()
-        .showToast(
-          `Hash transaction ${transactionHash &&
-          `${transactionHash.slice(0, 6)}...${transactionHash.slice(-4)}`
-          } is being processed`,
-          "success"
-        );
-    }
-  }, [error, isLoadingTx]);
+  const fillMaxRbll = () => {
+    setMaxWithdraw(true);
+    setValueRBLL(unitsToInput(suppliedUnits, 6));
+  };
 
   return (
     <Tabs>
@@ -244,13 +134,8 @@ export const ContextSupplyDrex = ({
                   placeholder={"0"}
                   value={valueDREX}
                   onChange={(e) => {
-                    const enteredValue = Number(e.target.value);
-                    if (enteredValue > drexBalance) {
-                      setError("The amount entered is greater than the current balance.");
-                    } else {
-                      setError("");
-                      setValueDREX(e.target.value);
-                    }
+                    setValueDREX(e.target.value);
+                    overBalance(toUnits(e.target.value, 6), drexBalanceUnits);
                   }}
                   style={{
                     WebkitAppearance: "none",
@@ -260,7 +145,7 @@ export const ContextSupplyDrex = ({
                 <div className="flex w-[130px] items-center justify-center gap-2.5 p-2">
                   <button
                     className="text-brandBlue-300 text-base font-normal leading-normal"
-                    onClick={() => setValueDREX(drexBalance.toString())}
+                    onClick={() => setValueDREX(unitsToInput(dataDrexBalance, 6))}
                   >
                     max
                   </button>
@@ -282,10 +167,10 @@ export const ContextSupplyDrex = ({
             <div className=" flex justify-between text-white">
               <span>Supply APR:</span>
               <span>
-                {(Number(dataSupplyInterestRate || 0) / 10e5).toLocaleString(
-                  "en-US",
-                  { minimumFractionDigits: 2, maximumFractionDigits: 2 }
-                )}
+                {supplyApr.toLocaleString("en-US", {
+                  minimumFractionDigits: 2,
+                  maximumFractionDigits: 2,
+                })}
                 %
               </span>
             </div>
@@ -315,10 +200,7 @@ export const ContextSupplyDrex = ({
               <span>Utilization Rate:</span>
               <span>
                 {!isLoading
-                  ? `${(
-                    (Number(dataTotalBorrowed) / Number(dataTotalSupplied)) *
-                    100
-                  ).toLocaleString("en-US", {
+                  ? `${utilization.toLocaleString("en-US", {
                     minimumFractionDigits: 2,
                     maximumFractionDigits: 2,
                   })}`
@@ -327,23 +209,18 @@ export const ContextSupplyDrex = ({
               </span>
             </div>
           </div>
-          {Number(approvedAmountDREX) >= Number(valueDREX) ? (
+          {allowance >= supplyAmount ? (
             <Button
               text="Supply"
               onClick={writeDeposit}
               isLoading={isLoadingDeposit}
-              disabled={
-                valueDREX === "" || Number(valueDREX) === 0 || isLoadingTx
-              }
+              disabled={supplyAmount === 0n || supplyAmount > drexBalanceUnits}
             />
           ) : (
             <Button
               text="Approve"
               onClick={writeApprove}
               isLoading={isLoadingApproval}
-              disabled={
-                valueDREX === "" || Number(valueDREX) === 0 || isLoadingTx
-              }
             />
           )}
         </div>
@@ -356,10 +233,10 @@ export const ContextSupplyDrex = ({
                 <div className="text-base font-normal leading-normal text-gray-400">
                   Balance:{" "}
                   {!isLoading
-                    ? `${(Number(dataSuppliedDREX) / 10 ** 18).toLocaleString(
-                      "en-US",
-                      { minimumFractionDigits: 2, maximumFractionDigits: 2 }
-                    )}`
+                    ? `${suppliedDREX.toLocaleString("en-US", {
+                      minimumFractionDigits: 2,
+                      maximumFractionDigits: 2,
+                    })}`
                     : "0"}{" "}
                   rBRLL
                 </div>
@@ -370,15 +247,7 @@ export const ContextSupplyDrex = ({
                   className="h-full min-w-[50px] border-none bg-transparent text-base font-normal leading-normal text-white shadow outline-none focus:border-transparent focus:outline-none focus:ring-0"
                   placeholder={"0"}
                   value={valueRBLL}
-                  onChange={(e) => {
-                    const enteredValue = Number(e.target.value);
-                    if (enteredValue > Number(dataSuppliedDREX) / 10 ** 18) {
-                      setError("The amount entered is greater than the current balance.");
-                    } else {
-                      setError("");
-                      setValueRBLL(e.target.value);
-                    }
-                  }}
+                  onChange={(e) => onRbllChange(e.target.value)}
                   style={{
                     WebkitAppearance: "none",
                     MozAppearance: "textfield",
@@ -387,11 +256,7 @@ export const ContextSupplyDrex = ({
                 <div className="flex w-[130px] items-center justify-center gap-2.5 p-2">
                   <button
                     className="text-brandBlue-300 text-base font-normal leading-normal"
-                    onClick={() =>
-                      setValueRBLL(
-                        (Number(dataSuppliedDREX) / 10 ** 18).toString()
-                      )
-                    }
+                    onClick={fillMaxRbll}
                   >
                     max
                   </button>
@@ -437,10 +302,7 @@ export const ContextSupplyDrex = ({
               <span>Available Liquidity:</span>
               <span>
                 {!isLoading
-                  ? `R$ ${(
-                    (Number(dataTotalSupplied) - Number(dataTotalBorrowed)) /
-                    10 ** 18
-                  ).toLocaleString("en-US", {
+                  ? `R$ ${(formattedTotalSupply - formattedTotalBorrowed).toLocaleString("en-US", {
                     minimumFractionDigits: 2,
                     maximumFractionDigits: 2,
                   })}`
@@ -473,10 +335,7 @@ export const ContextSupplyDrex = ({
               <span>Utilization Rate:</span>
               <span>
                 {!isLoading
-                  ? `${(
-                    (Number(dataTotalBorrowed) / Number(dataTotalSupplied)) *
-                    100
-                  ).toLocaleString("en-US", {
+                  ? `${utilization.toLocaleString("en-US", {
                     minimumFractionDigits: 2,
                     maximumFractionDigits: 2,
                   })}`
@@ -490,7 +349,7 @@ export const ContextSupplyDrex = ({
             text="Withdraw"
             onClick={writeWithdrawal}
             isLoading={isLoadingWithDrawal}
-            disabled={valueRBLL === "" || Number(valueRBLL) === 0}
+            disabled={!isMaxWithdraw && (rbllAmount === 0n || rbllAmount > suppliedUnits)}
           />
         </div>
       </TabContent>
@@ -502,10 +361,10 @@ export const ContextSupplyDrex = ({
                 <div className="text-base font-normal leading-normal text-gray-400">
                   Balance:{" "}
                   {!isLoading
-                    ? `${(Number(dataSuppliedDREX) / 10 ** 18).toLocaleString(
-                      "en-US",
-                      { minimumFractionDigits: 2, maximumFractionDigits: 2 }
-                    )}`
+                    ? `${suppliedDREX.toLocaleString("en-US", {
+                      minimumFractionDigits: 2,
+                      maximumFractionDigits: 2,
+                    })}`
                     : "0"}{" "}
                   rBRLL
                 </div>
@@ -516,15 +375,7 @@ export const ContextSupplyDrex = ({
                   className="h-full min-w-[50px] border-none bg-transparent text-base font-normal leading-normal text-white shadow outline-none focus:border-transparent focus:outline-none focus:ring-0"
                   placeholder={"0"}
                   value={valueRBLL}
-                  onChange={(e) => {
-                    const enteredValue = Number(e.target.value);
-                    if (enteredValue > Number(dataSuppliedDREX) / 10 ** 18) {
-                      setError("The amount entered is greater than the current balance.");
-                    } else {
-                      setError("");
-                      setValueRBLL(e.target.value);
-                    }
-                  }}
+                  onChange={(e) => onRbllChange(e.target.value)}
                   style={{
                     WebkitAppearance: "none",
                     MozAppearance: "textfield",
@@ -533,11 +384,7 @@ export const ContextSupplyDrex = ({
                 <div className="flex w-[130px] items-center justify-center gap-2.5 p-2">
                   <button
                     className="text-brandBlue-300 text-base font-normal leading-normal"
-                    onClick={() =>
-                      setValueRBLL(
-                        (Number(dataSuppliedDREX) / 10 ** 18).toString()
-                      )
-                    }
+                    onClick={() => setValueRBLL(unitsToInput(suppliedUnits, 6))}
                   >
                     max
                   </button>
@@ -587,7 +434,7 @@ export const ContextSupplyDrex = ({
             text="Recall"
             onClick={writeRecall}
             isLoading={isLoadingRecall}
-            disabled={!canRecall || valueRBLL === "" || Number(valueRBLL) === 0}
+            disabled={!canRecall || rbllAmount === 0n || recallTselicMax === 0n}
           />
         </div>
       </TabContent>

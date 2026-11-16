@@ -26,7 +26,9 @@ import {
   useGetTotalDepositedTSELIC,
   useGetUnitValue,
   useGetInterestRate,
-  getSupplyInterestRate,
+  useGetSupplyInterestRate,
+  useGetReserveFactor,
+  useGetSafeCollateralRate,
 } from "../hooks/useRBLLPoolContract";
 
 import { BigNumberish } from "ethers";
@@ -108,7 +110,10 @@ export default function HomePage() {
     data: dataSupplyInterestRate,
     isError: isErrorSupplyInterestRate,
     isLoading: isLoadingSupplyInterestRate,
-  } = getSupplyInterestRate(dataTotalSupplied || 0, dataTotalBorrowed || 0);
+  } = useGetSupplyInterestRate(dataTotalSupplied || 0, dataTotalBorrowed || 0);
+
+  const { data: dataReserveFactor } = useGetReserveFactor();
+  const { data: dataSafeRate } = useGetSafeCollateralRate();
 
   useEffect(() => {
     const allDataLoaded = [
@@ -138,14 +143,14 @@ export default function HomePage() {
     1e18;
   const borrowedAmountNum = safeNumber(borrowedAmount);
 
-  // Validação para divisão por zero
+  // The pool caps debt at collateral value / safeCollateralRate (101% by default).
+  const safeRatio = safeNumber(dataSafeRate as BigNumberish) / 1e20 || 1.01;
+  const maxDebt = tselicMultiplier / safeRatio;
   const availableToBorrow =
-    tselicMultiplier === 0 ? 0 : (tselicMultiplier - borrowedAmountNum) / 1e18;
+    maxDebt === 0 ? 0 : Math.max(maxDebt - borrowedAmountNum, 0) / 1e18;
 
   const borrowPercentual =
-    tselicMultiplier === 0
-      ? 0
-      : Number((borrowedAmountNum / tselicMultiplier) * 100).toFixed(2);
+    maxDebt === 0 ? 0 : Number((borrowedAmountNum / maxDebt) * 100).toFixed(2);
 
   // Balanços
   const tselicBalance = tselicMultiplier / 1e18;
@@ -153,10 +158,12 @@ export default function HomePage() {
 
   // APRs
   const tselicApr = safeNumber(dataInterestRate as BigNumberish) / 10e5;
+  // Suppliers get the utilization-scaled rate minus the reserve cut (1e8-scaled);
+  // borrowers pay the full SELIC rate on their debt.
   const drexSupplyApr =
-    ((safeNumber(dataSupplyInterestRate as BigNumberish) / 1e6) * 99) / 100;
-  const drexBorrowApr =
-    safeNumber(dataSupplyInterestRate as BigNumberish) / 1e6;
+    (safeNumber(dataSupplyInterestRate as BigNumberish) / 1e6) *
+    (1 - safeNumber(dataReserveFactor as BigNumberish) / 1e8);
+  const drexBorrowApr = tselicApr;
 
   // Valores Emprestados
   const borrowedDrex = borrowedAmountNum / 1e18;
@@ -314,10 +321,7 @@ export default function HomePage() {
                 items={[
                   {
                     title: "DREX",
-                    apr: `${(
-                      ((Number(dataSupplyInterestRate) / 1e6) * 99) /
-                      100
-                    ).toLocaleString("en-US", {
+                    apr: `${drexSupplyApr.toLocaleString("en-US", {
                       minimumFractionDigits: 2,
                       maximumFractionDigits: 2,
                     })}%`,
@@ -367,9 +371,7 @@ export default function HomePage() {
                 items={[
                   {
                     title: "DREX",
-                    apr: `${(
-                      Number(dataSupplyInterestRate) / 1e6
-                    ).toLocaleString("en-US", {
+                    apr: `${drexBorrowApr.toLocaleString("en-US", {
                       minimumFractionDigits: 2,
                       maximumFractionDigits: 2,
                     })}%`,

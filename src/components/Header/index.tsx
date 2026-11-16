@@ -13,11 +13,6 @@ import { Button } from "../Button";
 import {
   useFaucetWrite
 } from "@/hooks/useRBLLPoolContract";
-import { useToastStore } from "@/stores/toast";
-import { useWaitForTransaction } from "wagmi";
-import {
-  EthereumAddress
-} from "@/hooks/useErc20";
 
 export const Header = () => {
   const { disconnect } = useDisconnect();
@@ -27,67 +22,19 @@ export const Header = () => {
 
   const [isClient, setIsClient] = useState(false);
 
-  const [isLoadingTx, setLoadingTx] = useState(false);
-  const [transactionHash, setTransactionHash] = useState<
-  EthereumAddress | undefined
->(undefined);
-
   // Sticky Navbar
   const [sticky, setSticky] = useState(false);
-  const handleStickyNavbar = () => {
-    if (window.scrollY >= 80) {
-      setSticky(true);
-    } else {
-      setSticky(false);
-    }
-  };
-
   useEffect(() => {
     setIsClient(true);
   }, []);
 
   useEffect(() => {
+    const handleStickyNavbar = () => setSticky(window.scrollY >= 80);
     window.addEventListener("scroll", handleStickyNavbar);
-  });
+    return () => window.removeEventListener("scroll", handleStickyNavbar);
+  }, []);
 
-  const {
-    write: writeFaucet,
-    data: dataFaucet,
-    isLoading: isLoadingFaucet,
-    isSuccess: isSuccessFaucet,
-    isError: isErrorFaucet,
-  } = useFaucetWrite();
-
-  const transaction = useWaitForTransaction({
-    hash: transactionHash,
-  });
-  console.log(isErrorFaucet)
-  useEffect(() => {
-    if (transaction.isSuccess) {
-      useToastStore
-        .getState()
-        .showToast("Claim Successfully Completed", "success");
-    }
-    if (transaction.isError && transactionHash !== "0x") {
-      useToastStore
-        .getState()
-        .showToast(`Error: Need to Wait 1 hour`, "error");
-    }
-    setTransactionHash(undefined);
-    setLoadingTx(false);
-  }, [transaction.isSuccess, transaction.isError]);
-  useEffect(() => {
-    if (isSuccessFaucet) {
-      setTransactionHash(dataFaucet.hash);
-      setLoadingTx(true);
-      useToastStore
-        .getState()
-        .showToast("Faucet Initiated", "success");
-    }
-    if (isErrorFaucet) {
-      useToastStore.getState().showToast("Transaction Rejected", "error");
-    }
-  }, [isErrorFaucet, isSuccessFaucet]);
+  const { write: writeFaucet, isLoading: isLoadingFaucet } = useFaucetWrite();
 
   return (
     <header
@@ -129,6 +76,7 @@ export const Header = () => {
                 height="h-[16px]"
                 maxWidth="max-w-[60px]"
                 textSize="text-xs"
+                isLoading={isLoadingFaucet}
                 onClick={writeFaucet} />
               <div className="group relative ml-2">
                 <div className="bg-brandBlue-300 flex h-[45px] max-w-[212px] items-center justify-center gap-4 rounded-[5px] py-4 pl-4 pr-6 text-sm">

@@ -1,7 +1,6 @@
-"use Client";
+"use client";
 import { Button } from "@/components/Button";
 import Tabs, { TabContent } from "@/components/Tabs";
-import ToastNotification from "@/components/Toast";
 import {
   EthereumAddress,
   useAllowanceTSELIC,
@@ -14,174 +13,56 @@ import {
   useSupplyTSELIC,
   useWithdrawTSELIC,
 } from "@/hooks/useRBLLPoolContract";
+import { fromUnits, toUnits, unitsToInput } from "@/hooks/useTx";
 import { useToastStore } from "@/stores/toast";
-import { BigNumberish } from "ethers";
 import Image from "next/image";
-import { useEffect, useState } from "react";
-import { useWaitForTransaction } from "wagmi";
+import { useState } from "react";
 
 export const ContextSupplyTSelic = ({ address }: { address: string }) => {
-  const [isLoading, setLoading] = useState(true);
   const [valueTselic, setValueTselic] = useState("");
   const [valueWithdrawlTselic, setValueWithdrawlTselic] = useState("");
-  const [error, setError] = useState("");
-  const [isLoadingTx, setLoadingTx] = useState(false);
-  const [transactionHash, setTransactionHash] = useState<
-    EthereumAddress | undefined
-  >(undefined);
+  // Max withdraw goes through withdrawAllTSELIC so no dust is left behind.
+  const [isMaxWithdraw, setMaxWithdraw] = useState(false);
 
-  const {
-    data: dataTselicBalance,
-    isError: isTselicError,
-    isLoading: isLoadingTselic,
-  } = useBalanceOfTSELIC(address as EthereumAddress);
-  const formattedTselicBalance = Number(dataTselicBalance) / 10 ** 18;
+  const { data: dataTselicBalance, isLoading: isLoadingTselic } =
+    useBalanceOfTSELIC(address as EthereumAddress);
+  const { data: dataDepositedTSELIC, isLoading: isLoadingDepositedTSELIC } =
+    useGetDepositedTSELIC(address as EthereumAddress);
+  const { data: dataBorrowedAmount, isLoading: isLoadingBorrowedAmount } =
+    useGetBorrowedAmount(address as EthereumAddress);
+  const { data: dataAllowanceTSELIC, isLoading: isLoadingAllowanceTSELIC } =
+    useAllowanceTSELIC(address as EthereumAddress);
 
-  const {
-    data: dataDepositedTSELIC,
-    isError: isErrorDepositedTSELIC,
-    isLoading: isLoadingDepositedTSELIC,
-  } = useGetDepositedTSELIC(address as EthereumAddress);
-  const formattedDepositedTSELIC = Number(dataDepositedTSELIC) / 10 ** 18;
+  const isLoading =
+    isLoadingTselic ||
+    isLoadingDepositedTSELIC ||
+    isLoadingBorrowedAmount ||
+    isLoadingAllowanceTSELIC;
 
-  const {
-    data: dataBorrowedAmount,
-    isError: isErrorBorrowedAmount,
-    isLoading: isLoadingBorrowedAmount,
-  } = useGetBorrowedAmount(address as EthereumAddress);
-  const formattedBorrowed = Number(dataBorrowedAmount) / 10 ** 18;
+  const formattedTselicBalance = fromUnits(dataTselicBalance, 18);
+  const formattedDepositedTSELIC = fromUnits(dataDepositedTSELIC, 18);
+  const formattedBorrowed = fromUnits(dataBorrowedAmount, 18);
 
-  const {
-    data: dataAllowanceTSELIC,
-    isError: isErrorAllowanceTSELIC,
-    isLoading: isLoadingAllowanceTSELIC,
-  } = useAllowanceTSELIC(address as EthereumAddress);
+  const supplyAmount = toUnits(valueTselic, 18);
+  const withdrawAmount = toUnits(valueWithdrawlTselic, 18);
+  const allowance = typeof dataAllowanceTSELIC === "bigint" ? dataAllowanceTSELIC : 0n;
+  const tselicBalance = typeof dataTselicBalance === "bigint" ? dataTselicBalance : 0n;
+  const deposited = typeof dataDepositedTSELIC === "bigint" ? dataDepositedTSELIC : 0n;
 
-  const {
-    write: writeApproveTSELIC,
-    data: dataApproveTSELIC,
-    isLoading: isLoadingApproveTSELIC,
-    isSuccess: isSuccessApproveTSELIC,
-    isError: isErrorApproveTSELIC,
-  } = useApproveTSELIC();
+  const { write: writeApproveTSELIC, isLoading: isLoadingApproveTSELIC } =
+    useApproveTSELIC();
+  const { write: writeSupplyTSELIC, isLoading: isLoadingSupplyTSELIC } =
+    useSupplyTSELIC(supplyAmount);
+  const { write: writeWithdrawTSELIC, isLoading: isLoadingWithdrawTSELIC } =
+    useWithdrawTSELIC(isMaxWithdraw ? "MAX" : withdrawAmount);
 
-  const {
-    write: writeSupplyTSELIC,
-    data: dataSupplyTSELIC,
-    isLoading: isLoadingSupplyTSELIC,
-    isSuccess: isSuccessSupplyTSELIC,
-    isError: isErrorSupplyTSELIC,
-  } = useSupplyTSELIC(
-    Number(valueTselic) * 10 ** 18
-  );
-
-  const {
-    write: writeWithdrawTSELIC,
-    data: dataWithdrawTSELIC,
-    isLoading: isLoadingWithdrawTSELIC,
-    isSuccess: isSuccessWithdrawTSELIC,
-    isError: isErrorWithdrawTSELIC,
-  } = useWithdrawTSELIC(
-    Number(valueWithdrawlTselic) * 10 ** 18
-  );
-
-  const [approvedAmountTselic, setApprovedAmountTselic] = useState(
-    Number(dataAllowanceTSELIC) / 10 ** 18
-  );
-  const transaction = useWaitForTransaction({
-    hash: transactionHash,
-  });
-
-  useEffect(() => {
-    if (transaction.isSuccess) {
+  const overBalance = (value: bigint, limit: bigint) => {
+    if (value > limit) {
       useToastStore
         .getState()
-        .showToast("Transaction successfully completed", "success");
+        .showToast("The amount entered is greater than the current balance.", "error");
     }
-    if (transaction.isError && transactionHash !== "0x") {
-      useToastStore
-        .getState()
-        .showToast(`Erro on TX: ${transaction.error}`, "error");
-    }
-    setTransactionHash(undefined);
-    setLoadingTx(false);
-  }, [transaction.isSuccess, transaction.isError]);
-
-  useEffect(() => {
-    if (isSuccessApproveTSELIC) {
-      setTransactionHash(dataApproveTSELIC.hash);
-      setLoadingTx(true);
-      useToastStore
-        .getState()
-        .showToast("TSELIC approval successful", "success");
-    }
-    if (isErrorApproveTSELIC) {
-      useToastStore.getState().showToast("Error approving TSELIC", "error");
-    }
-  }, [isErrorApproveTSELIC, isSuccessApproveTSELIC]);
-
-  useEffect(() => {
-    if (Number(dataAllowanceTSELIC) !== approvedAmountTselic * 10 ** 18) {
-      setApprovedAmountTselic(Number(dataAllowanceTSELIC) / 10 ** 18);
-    }
-  }, [dataAllowanceTSELIC]);
-
-  useEffect(() => {
-    if (isSuccessSupplyTSELIC) {
-      setTransactionHash(dataSupplyTSELIC.hash);
-      setLoadingTx(true);
-      useToastStore
-        .getState()
-        .showToast("TSELIC approval successful", "success");
-    }
-    if (isErrorSupplyTSELIC) {
-      useToastStore.getState().showToast("Error approving TSELIC", "error");
-    }
-  }, [isErrorSupplyTSELIC, isSuccessSupplyTSELIC]);
-
-  useEffect(() => {
-    if (isSuccessWithdrawTSELIC) {
-      setTransactionHash(dataWithdrawTSELIC.hash);
-      setLoadingTx(true);
-      useToastStore.getState().showToast("Successful withdrawal", "success");
-    }
-    if (isErrorWithdrawTSELIC) {
-      useToastStore.getState().showToast("TSELIC withdrawal error", "error");
-    }
-  }, [isErrorWithdrawTSELIC, isSuccessWithdrawTSELIC]);
-
-  useEffect(() => {
-    const loading = [
-      isLoadingTselic,
-      isLoadingDepositedTSELIC,
-      isLoadingBorrowedAmount,
-      isLoadingAllowanceTSELIC,
-    ].every((loading) => loading === false);
-
-    setLoading(!loading);
-  }, [
-    isLoadingTselic,
-    isLoadingDepositedTSELIC,
-    isLoadingBorrowedAmount,
-    isLoadingAllowanceTSELIC,
-  ]);
-
-  useEffect(() => {
-    if (error) {
-      useToastStore.getState().showToast(`${error}`, "error");
-    }
-
-    if (isLoadingTx) {
-      useToastStore
-        .getState()
-        .showToast(
-          `Hash transaction ${transactionHash &&
-          `${transactionHash.slice(0, 6)}...${transactionHash.slice(-4)}`
-          } is being processed`,
-          "success"
-        );
-    }
-  }, [error, isLoadingTx]);
+  };
 
   return (
     <Tabs>
@@ -208,13 +89,8 @@ export const ContextSupplyTSelic = ({ address }: { address: string }) => {
                   placeholder={"0"}
                   value={valueTselic}
                   onChange={(e) => {
-                    const enteredValue = Number(e.target.value);
-                    if (enteredValue > formattedTselicBalance) {
-                      setError("The amount entered is greater than the current balance.");
-                    } else {
-                      setError("");
-                      setValueTselic(e.target.value);
-                    }
+                    setValueTselic(e.target.value);
+                    overBalance(toUnits(e.target.value, 18), tselicBalance);
                   }}
                   style={{
                     WebkitAppearance: "none",
@@ -225,7 +101,7 @@ export const ContextSupplyTSelic = ({ address }: { address: string }) => {
                   <button
                     className="text-brandBlue-300 text-base font-normal leading-normal"
                     onClick={() =>
-                      setValueTselic(formattedTselicBalance.toString())
+                      setValueTselic(unitsToInput(dataTselicBalance, 18))
                     }
                   >
                     max
@@ -253,7 +129,7 @@ export const ContextSupplyTSelic = ({ address }: { address: string }) => {
             </div>
           </div>
 
-          {Number(approvedAmountTselic) < Number(valueTselic) ? (
+          {allowance < supplyAmount ? (
             <Button
               text="Approve"
               onClick={writeApproveTSELIC}
@@ -264,6 +140,7 @@ export const ContextSupplyTSelic = ({ address }: { address: string }) => {
               text="Supply"
               onClick={writeSupplyTSELIC}
               isLoading={isLoadingSupplyTSELIC}
+              disabled={supplyAmount === 0n || supplyAmount > tselicBalance}
             />
           )}
         </div>
@@ -274,9 +151,9 @@ export const ContextSupplyTSelic = ({ address }: { address: string }) => {
             <div className="flex h-full w-full flex-col items-start justify-start gap-1">
               <div className="inline-flex items-start justify-start gap-6">
                 <div className="text-base font-normal leading-normal text-gray-400">
-                  Balance:{" "}
+                  Supplied:{" "}
                   {!isLoading
-                    ? `${Number(formattedTselicBalance).toLocaleString(
+                    ? `${Number(formattedDepositedTSELIC).toLocaleString(
                       "en-US",
                       { minimumFractionDigits: 2, maximumFractionDigits: 2 }
                     )}`
@@ -291,13 +168,9 @@ export const ContextSupplyTSelic = ({ address }: { address: string }) => {
                   placeholder={"0"}
                   value={valueWithdrawlTselic}
                   onChange={(e) => {
-                    const enteredValue = Number(e.target.value);
-                    if (enteredValue > formattedDepositedTSELIC) {
-                      setError("The amount entered is greater than the current balance.");
-                    } else {
-                      setError("");
-                      setValueWithdrawlTselic(e.target.value);
-                    }
+                    setMaxWithdraw(false);
+                    setValueWithdrawlTselic(e.target.value);
+                    overBalance(toUnits(e.target.value, 18), deposited);
                   }}
                   style={{
                     WebkitAppearance: "none",
@@ -307,11 +180,10 @@ export const ContextSupplyTSelic = ({ address }: { address: string }) => {
                 <div className="flex w-[130px] items-center justify-center gap-2.5 p-2">
                   <button
                     className="text-brandBlue-300 text-base font-normal leading-normal"
-                    onClick={() =>
-                      setValueWithdrawlTselic(
-                        formattedDepositedTSELIC.toString()
-                      )
-                    }
+                    onClick={() => {
+                      setMaxWithdraw(true);
+                      setValueWithdrawlTselic(unitsToInput(dataDepositedTSELIC, 18));
+                    }}
                   >
                     max
                   </button>
@@ -352,6 +224,7 @@ export const ContextSupplyTSelic = ({ address }: { address: string }) => {
             text="Withdraw"
             onClick={writeWithdrawTSELIC}
             isLoading={isLoadingWithdrawTSELIC}
+            disabled={!isMaxWithdraw && (withdrawAmount === 0n || withdrawAmount > deposited)}
           />
         </div>
       </TabContent>

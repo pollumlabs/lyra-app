@@ -1,52 +1,26 @@
-import { useContractWrite, useContractRead, usePrepareContractWrite } from 'wagmi';
+import { useContractRead } from 'wagmi';
 import { BigNumberish } from 'ethers';
+import { useTx } from './useTx';
 import { abi as rBRLLABI } from '../contracts/rBRLLABI';
 import { abi as InterestRateModelABI } from '../contracts/InterestRateModelABI';
 import { rBRLLPool, InterestRateModel, FAUCET } from '../constant/contracts'
 import { abi as FaucetABI } from '../contracts/FaucetABI';
-
-type RBRLLPoolFunctionName = 'supplyDREX' | 'withdrawDREX' | 'withdrawAllDREX' | 'repayDREX' | 'repayAll' | 'flashLiquidateBorrow' | 'supplyTSELIC' | 'withdrawTSELIC' | 'withdrawAllTSELIC' | 'borrowDREX';
-type RBRLLPoolWriteArgs = BigNumberish[] | ['MAX'] | [string, BigNumberish, BigNumberish];
-
-interface ContractWriteHookReturn {
-  write: () => void;
-  data: any;
-  isLoading: boolean;
-  isSuccess: boolean;
-  isError: boolean;
-}
 
 interface ContractReadHookReturn<T> {
   data: T;
   isError: boolean;
   isLoading: boolean;
 }
-export function useFaucetWrite(): ContractWriteHookReturn {
-  const { config } = usePrepareContractWrite({
-    address: FAUCET,
-    abi: FaucetABI,
-    functionName: 'claimTokens',
-    args: []
-  });
 
-  const { write, data, isLoading, isSuccess, isError } = useContractWrite(config);
-  const safeWrite = write ?? (() => { });
-
-  return { write: safeWrite, data, isLoading, isSuccess, isError };
+function usePoolTx(functionName: string, args: readonly unknown[], successMessage: string) {
+  return useTx({ address: rBRLLPool, abi: rBRLLABI, functionName, args }, successMessage);
 }
 
-export function useRBRLLPoolWrite(functionName: RBRLLPoolFunctionName, args?: RBRLLPoolWriteArgs): ContractWriteHookReturn {
-  const { config } = usePrepareContractWrite({
-    address: rBRLLPool,
-    abi: rBRLLABI,
-    functionName,
-    args
-  });
-
-  const { write, data, isLoading, isSuccess, isError } = useContractWrite(config);
-  const safeWrite = write ?? (() => { });
-
-  return { write: safeWrite, data, isLoading, isSuccess, isError };
+export function useFaucetWrite() {
+  return useTx(
+    { address: FAUCET, abi: FaucetABI, functionName: 'claimTokens' },
+    'Claimed 0.1 TSELIC and 1,000 DREX'
+  );
 }
 
 export function useRBRLLPoolRead<T = any>(functionName: string, args?: any[]): ContractReadHookReturn<T> {
@@ -61,26 +35,22 @@ export function useRBRLLPoolRead<T = any>(functionName: string, args?: any[]): C
   return { data: data as T, isError, isLoading };
 }
 
-// Function to call supplyDREX
-export function useSupplyDREX(amount: BigNumberish) {
-  const formattedAmount = amount; // Add conversion logic here
-  return useRBRLLPoolWrite('supplyDREX', [formattedAmount]);
+// 'MAX' uses the contract's *All variants, which settle the exact balance
+// (including interest accrued after the UI last read it).
+export function useSupplyDREX(amount: bigint) {
+  return usePoolTx('supplyDREX', [amount], 'DREX supplied');
 }
 
-// Function to call withdrawDREX or withdrawAllDREX
-export function useWithdrawDREX(amount: BigNumberish | 'MAX') {
-  const isMax = amount === 'MAX';
-  const functionName = isMax ? 'withdrawAllDREX' : 'withdrawDREX';
-  const args = isMax ? [] : [amount]; // Convert to 6 decimal places if not 'MAX'
-  return useRBRLLPoolWrite(functionName, args);
+export function useWithdrawDREX(amount: bigint | 'MAX') {
+  return amount === 'MAX'
+    ? usePoolTx('withdrawAllDREX', [], 'DREX withdrawn')
+    : usePoolTx('withdrawDREX', [amount], 'DREX withdrawn');
 }
 
-// Function to call repayDREX  or repayAll
-export function useRepayDREX(amount: BigNumberish | 'MAX') {
-  const isRepayAll = amount === 'MAX';
-  const functionName = isRepayAll ? 'repayAll' : 'repayDREX';
-  const args = isRepayAll ? [] : [amount];
-  return useRBRLLPoolWrite(functionName, args);
+export function useRepayDREX(amount: bigint | 'MAX') {
+  return amount === 'MAX'
+    ? usePoolTx('repayAll', [], 'Debt repaid')
+    : usePoolTx('repayDREX', [amount], 'Debt repaid');
 }
 
 // Function to get total supplied
@@ -99,22 +69,18 @@ export function useGetTotalDepositedTSELIC() {
 }
 
 
-// Function to call flashLiquidateBorrow
-export function useFlashLiquidateBorrow(borrower: string, repayAmount: BigNumberish, tselicInMaximum: BigNumberish) {
-  return useRBRLLPoolWrite('flashLiquidateBorrow', [borrower, repayAmount, tselicInMaximum]);
+export function useFlashLiquidateBorrow(borrower: string, repayAmount: bigint, tselicInMaximum: bigint) {
+  return usePoolTx('flashLiquidateBorrow', [borrower, repayAmount, tselicInMaximum], 'Recall executed');
 }
 
-// Function to call supplyTSELIC
-export function useSupplyTSELIC(amount: BigNumberish) {
-  return useRBRLLPoolWrite('supplyTSELIC', [amount]);
+export function useSupplyTSELIC(amount: bigint) {
+  return usePoolTx('supplyTSELIC', [amount], 'TSELIC supplied');
 }
 
-// Function to call withdrawTSELIC or withdrawAllTSELIC
-export function useWithdrawTSELIC(amount: BigNumberish | 'MAX') {
-  const isMax = amount === 'MAX';
-  const functionName = isMax ? 'withdrawAllTSELIC' : 'withdrawTSELIC';
-  const args = isMax ? [] : [amount];
-  return useRBRLLPoolWrite(functionName, args);
+export function useWithdrawTSELIC(amount: bigint | 'MAX') {
+  return amount === 'MAX'
+    ? usePoolTx('withdrawAllTSELIC', [], 'TSELIC withdrawn')
+    : usePoolTx('withdrawTSELIC', [amount], 'TSELIC withdrawn');
 }
 
 // Function to get borrowed amount
@@ -132,14 +98,24 @@ export function useGetSuppliedDREX(userAddress: string) {
   return useRBRLLPoolRead('balanceOf', [userAddress]);
 }
 
-// Function to call borrowDREX
-export function useBorrowDREX(amount: BigNumberish) {
-  return useRBRLLPoolWrite('borrowDREX', [amount]);
+export function useBorrowDREX(amount: bigint) {
+  return usePoolTx('borrowDREX', [amount], 'DREX borrowed');
 }
 
-export function hasRole(role: string, userAddress: string) {
-  return useRBRLLPoolRead('hasRole', [role, userAddress]);
+export function useHasRole(role: string, userAddress: string) {
+  return useRBRLLPoolRead<boolean>('hasRole', [role, userAddress]);
 }
+
+// Collateral value * 100 / debt must stay >= this (1e18-scaled percent, 101e18 = 101%).
+export function useGetSafeCollateralRate() {
+  return useRBRLLPoolRead<bigint>('safeCollateralRate');
+}
+
+// Share of interest kept by the protocol, scaled by 1e8.
+export function useGetReserveFactor() {
+  return useRBRLLPoolRead<bigint>('reserveFactor');
+}
+
 // Function to get the market price of TSELIC via Chainlink
 export function useGetUnitValue<T = any>(): ContractReadHookReturn<T> {
   const { data, isError, isLoading } = useContractRead({
@@ -152,7 +128,7 @@ export function useGetUnitValue<T = any>(): ContractReadHookReturn<T> {
 }
 
 // Function to get Supply Secondly Rate
-export function getSupplyInterestRate(totalSupply: BigNumberish, totalBorrow: BigNumberish) {
+export function useGetSupplyInterestRate(totalSupply: BigNumberish, totalBorrow: BigNumberish) {
   const { data, isError, isLoading } = useContractRead({
     address: InterestRateModel,
     abi: InterestRateModelABI,

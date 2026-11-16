@@ -12,14 +12,22 @@ import {
   useBorrowDREX,
   useGetBorrowedAmount,
   useGetDepositedTSELIC,
+  useGetSafeCollateralRate,
   useGetUnitValue,
   useRepayDREX,
 } from "@/hooks/useRBLLPoolContract";
+import { fromUnits, toUnits, unitsToInput } from "@/hooks/useTx";
 import { useToastStore } from "@/stores/toast";
-import { BigNumberish, parseUnits, formatUnits } from "ethers";
+import { BigNumberish } from "ethers";
 import Image from "next/image";
-import { useEffect, useState } from "react";
-import { useWaitForTransaction } from "wagmi";
+import { useState } from "react";
+
+const RBLL_PER_DREX = 10n ** 12n; // rBRLL has 18 decimals, DREX 6
+const DEFAULT_SAFE_RATE = 101n * 10n ** 18n;
+
+const asBigint = (value: unknown) => (typeof value === "bigint" ? value : 0n);
+const fmt2 = (value: number) =>
+  value.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 
 export const ContextBorrowDrex = ({
   address,
@@ -30,168 +38,62 @@ export const ContextBorrowDrex = ({
   dataTotalSupplied: BigNumberish;
   dataTotalBorrowed: BigNumberish;
 }) => {
-  const [borrowValue, setBorrowValue] = useState(0);
-  const [repayValue, setRepayValue] = useState(0);
-  const [error, setError] = useState("");
-  const [isLoadingTx, setLoadingTx] = useState(false);
-  const [transactionHash, setTransactionHash] = useState<
-    EthereumAddress | undefined
-  >(undefined);
+  const [borrowValue, setBorrowValue] = useState("");
+  const [repayValue, setRepayValue] = useState("");
+  // Max repay goes through repayAll, which settles the exact debt including
+  // interest accrued after the UI last read it.
+  const [isMaxRepay, setMaxRepay] = useState(false);
 
-  const transaction = useWaitForTransaction({
-    hash: transactionHash,
-  });
+  const { data: dataDrexBalance, isLoading: isLoadingDrex } = useBalanceOfDREX(
+    address as EthereumAddress
+  );
+  const { data: dataDepositedTSELIC, isLoading: isLoadingDepositedTSELIC } =
+    useGetDepositedTSELIC(address as EthereumAddress);
+  const { data: dataBorrowedAmount, isLoading: isLoadingBorrowedAmount } =
+    useGetBorrowedAmount(address as EthereumAddress);
+  const { data: dataUnitValue, isLoading: isLoadingUnitValue } = useGetUnitValue();
+  const { data: dataAllowanceDREX } = useAllowanceDREX(address as EthereumAddress);
+  const { data: dataSafeRate } = useGetSafeCollateralRate();
 
-  const {
-    data: dataDrexBalance,
-    isError: isDrexError,
-    isLoading: isLoadingDrex,
-  } = useBalanceOfDREX(address as EthereumAddress);
+  const isLoading =
+    isLoadingDrex || isLoadingDepositedTSELIC || isLoadingBorrowedAmount || isLoadingUnitValue;
 
-  const {
-    data: dataDepositedTSELIC,
-    isError: isErrorDepositedTSELIC,
-    isLoading: isLoadingDepositedTSELIC,
-  } = useGetDepositedTSELIC(address as EthereumAddress);
+  const drexBalanceUnits = asBigint(dataDrexBalance);
+  const deposited = asBigint(dataDepositedTSELIC);
+  const debt = asBigint(dataBorrowedAmount); // rBRLL, 18 decimals
+  const unitValue = asBigint(dataUnitValue);
+  const allowance = asBigint(dataAllowanceDREX);
+  const safeRate = asBigint(dataSafeRate) || DEFAULT_SAFE_RATE;
+  const liquidity = asBigint(dataTotalSupplied) - asBigint(dataTotalBorrowed);
 
-  const {
-    data: dataBorrowedAmount,
-    isError: isErrorBorrowedAmount,
-    isLoading: isLoadingBorrowedAmount,
-  } = useGetBorrowedAmount(address as EthereumAddress);
+  // The pool requires collateralValue * 100 / debt >= safeCollateralRate.
+  const maxDebt = (deposited * unitValue * 100n) / safeRate;
+  const headroom = maxDebt > debt ? maxDebt - debt : 0n;
+  // Keep 0.1% back so interest accrued before the tx lands doesn't trip the check.
+  const byCollateral = (headroom * 999n) / 1000n / RBLL_PER_DREX;
+  const byLiquidity = liquidity > 0n ? liquidity / RBLL_PER_DREX : 0n;
+  const maxBorrow = byCollateral < byLiquidity ? byCollateral : byLiquidity;
 
-  const {
-    data: dataUnitValue,
-    isError: isErrorUnitValue,
-    isLoading: isLoadingUnitValue,
-  } = useGetUnitValue();
+  // repayAll pulls debt/1e12 + 1 DREX.
+  const debtDrex = debt > 0n ? debt / RBLL_PER_DREX + 1n : 0n;
 
-  const {
-    data: dataAllowanceDREX,
-    isError: isErrorAllowanceDREX,
-    isLoading: isLoadingAllowanceDREX,
-  } = useAllowanceDREX(address as EthereumAddress);
+  const borrowAmount = toUnits(borrowValue, 6);
+  const repayAmount = isMaxRepay ? debtDrex : toUnits(repayValue, 6);
 
-  const {
-    write: writeBorrowDREX,
-    data: dataBorrowDREX,
-    isLoading: isLoadingBorrowDREX,
-    isSuccess: isSuccessBorrowDREX,
-    isError: isErrorBorrowDREX,
-  } = useBorrowDREX(parseUnits(borrowValue.toFixed(6), 6).toString());
+  const { write: writeBorrowDREX, isLoading: isLoadingBorrowDREX } =
+    useBorrowDREX(borrowAmount);
+  const { write: writeRepayDREX, isLoading: isLoadingRepayDREX } = useRepayDREX(
+    isMaxRepay ? "MAX" : repayAmount
+  );
+  const { write: writeApproveDREX, isLoading: isLoadingApproveDREX } = useApproveDREX();
 
-  const {
-    write: writeRepayDREX,
-    data: dataRepayDREX,
-    isLoading: isLoadingRepayDREX,
-    isSuccess: isSuccessRepayDREX,
-    isError: isErrorRepayDREX,
-  } = useRepayDREX(parseUnits(repayValue.toFixed(6), 6).toString());
+  const warn = (message: string) => useToastStore.getState().showToast(message, "error");
 
-  const {
-    write: writeApproveDREX,
-    data: dataApproveDREX,
-    isLoading: isLoadingApproveDREX,
-    isSuccess: isSuccessApproveDREX,
-    isError: isErrorApproveDREX,
-  } = useApproveDREX();
-
-  useEffect(() => {
-    if (transaction.isSuccess) {
-      useToastStore
-        .getState()
-        .showToast("Transaction successfully completed", "success");
-    }
-    if (transaction.isError && transactionHash !== "0x") {
-      useToastStore
-        .getState()
-        .showToast(`Erro on TX: ${transaction.error}`, "error");
-    }
-    setTransactionHash(undefined);
-    setLoadingTx(false);
-  }, [transaction.isSuccess, transaction.isError]);
-
-  useEffect(() => {
-    if (isSuccessApproveDREX) {
-      setTransactionHash(dataApproveDREX.hash);
-      setLoadingTx(true);
-      useToastStore
-        .getState()
-        .showToast("DREX approval successful", "success");
-    }
-    if (isErrorApproveDREX) {
-      useToastStore.getState().showToast("Error approving DREX", "error");
-    }
-  }, [isErrorApproveDREX, isSuccessApproveDREX]);
-
-  useEffect(() => {
-    if (isSuccessBorrowDREX) {
-      setTransactionHash(dataBorrowDREX.hash);
-      setLoadingTx(true);
-      useToastStore
-        .getState()
-        .showToast("Successful Borrowed", "success");
-    }
-    if (isErrorBorrowDREX) {
-      useToastStore.getState().showToast("DREX Borrowed Error", "error");
-    }
-  }, [isErrorBorrowDREX, isSuccessBorrowDREX]);
-
-  useEffect(() => {
-    if (isSuccessRepayDREX) {
-      setTransactionHash(dataRepayDREX.hash);
-      setLoadingTx(true);
-      useToastStore
-        .getState()
-        .showToast("Successfully repaying debt", "success");
-    }
-    if (isErrorRepayDREX) {
-      useToastStore.getState().showToast("Error when depositing DREX", "error");
-    }
-  }, [isErrorRepayDREX, isSuccessRepayDREX]);
-
-  const [isLoading, setLoading] = useState(true);
-
-  const drexBalance = Number(formatUnits(dataDrexBalance, 6)) || 0;
-  const depositedTSELIC = Number(formatUnits(dataDepositedTSELIC, 18)) || 0;
-  const borrowedAmount = Number(formatUnits(dataBorrowedAmount, 18)) || 0;
-  const unitValue = Number(formatUnits(dataUnitValue, 18)) || 0;
-  const allowanceDREX = Number(formatUnits(dataAllowanceDREX, 6)) || 0;
-  const totalSupplied = Number(formatUnits(dataTotalSupplied, 18)) || 0;
-  const totalBorrowed = Number(formatUnits(dataTotalBorrowed, 18)) || 0;
-
-  useEffect(() => {
-    const loading = [
-      isLoadingDrex,
-      isLoadingDepositedTSELIC,
-      isLoadingBorrowedAmount,
-      isLoadingUnitValue,
-    ].every((loading) => loading === false);
-
-    setLoading(!loading);
-  }, [
-    isLoadingDrex,
-    isLoadingDepositedTSELIC,
-    isLoadingBorrowedAmount,
-    isLoadingUnitValue,
-  ]);
-
-  useEffect(() => {
-    if (error) {
-      useToastStore.getState().showToast(`${error}`, "error");
-    }
-
-    if (isLoadingTx) {
-      useToastStore
-        .getState()
-        .showToast(
-          `Hash transaction ${transactionHash &&
-          `${transactionHash.slice(0, 6)}...${transactionHash.slice(-4)}`
-          } is being processed`,
-          "success"
-        );
-    }
-  }, [error, isLoadingTx]);
+  const drexBalance = fromUnits(dataDrexBalance, 6);
+  const depositedTSELIC = fromUnits(dataDepositedTSELIC, 18);
+  const borrowedAmount = fromUnits(dataBorrowedAmount, 18);
+  const collateralValue = fromUnits(deposited * unitValue, 36);
+  const availableLiquidity = fromUnits(liquidity, 18);
 
   return (
     <Tabs>
@@ -201,35 +103,19 @@ export const ContextBorrowDrex = ({
             <div className="flex h-full w-full flex-col items-start justify-start gap-1">
               <div className="inline-flex items-start justify-start gap-6">
                 <div className="text-base font-normal leading-normal text-gray-400">
-                  Balance:{" "}
-                  {!isLoading
-                    ? `${drexBalance.toLocaleString("en-US", {
-                      minimumFractionDigits: 2,
-                      maximumFractionDigits: 2,
-                    })}`
-                    : "0"}{" "}
-                  DREX
+                  Balance: {!isLoading ? fmt2(drexBalance) : "0"} DREX
                 </div>
               </div>
               <div className="border-brandBlue-300 inline-flex w-full items-center justify-between rounded-lg border border-opacity-20 bg-gray-700 px-3">
                 <input
                   type="number"
                   className="h-full min-w-[50px] border-none bg-transparent text-base font-normal leading-normal text-white shadow outline-none focus:border-transparent focus:outline-none focus:ring-0"
+                  placeholder={"0"}
                   value={borrowValue}
                   onChange={(e) => {
-                    const enteredValue = Number(e.target.value);
-                    if (enteredValue > (depositedTSELIC * unitValue - borrowedAmount >
-                      totalSupplied - totalBorrowed
-                      ? totalSupplied - totalBorrowed
-                      : (
-                        ((depositedTSELIC * unitValue - borrowedAmount) *
-                          99) /
-                        100
-                      ))) {
-                      setError("The amount entered is greater than the current balance.");
-                    } else {
-                      setError("");
-                      setBorrowValue(enteredValue);
+                    setBorrowValue(e.target.value);
+                    if (toUnits(e.target.value, 6) > maxBorrow) {
+                      warn("The amount entered is greater than your borrow limit.");
                     }
                   }}
                   style={{
@@ -240,16 +126,7 @@ export const ContextBorrowDrex = ({
                 <div className="flex w-[130px] items-center justify-center gap-2.5 p-2">
                   <button
                     className="text-brandBlue-300 text-base font-normal leading-normal"
-                    onClick={() =>
-                      depositedTSELIC * unitValue - borrowedAmount >
-                        totalSupplied - totalBorrowed
-                        ? setBorrowValue(totalSupplied - totalBorrowed)
-                        : setBorrowValue(
-                          ((depositedTSELIC * unitValue - borrowedAmount) *
-                            99) /
-                          100
-                        )
-                    }
+                    onClick={() => setBorrowValue(unitsToInput(maxBorrow, 6))}
                   >
                     max
                   </button>
@@ -269,61 +146,25 @@ export const ContextBorrowDrex = ({
           <div className="flex h-full w-full flex-col gap-2">
             <div className=" flex justify-between text-white">
               <span>TSELIC Supplied:</span>
-              <span>
-                {!isLoading
-                  ? `${depositedTSELIC.toLocaleString("en-US", {
-                    minimumFractionDigits: 2,
-                    maximumFractionDigits: 2,
-                  })}`
-                  : "0"}{" "}
-                TSELIC
-              </span>
+              <span>{!isLoading ? fmt2(depositedTSELIC) : "0"} TSELIC</span>
             </div>
             <div className=" flex justify-between text-white">
               <span>Supplied (in Drex):</span>
-              <span>
-                {!isLoading
-                  ? `R$ ${(depositedTSELIC * unitValue).toLocaleString(
-                    "en-US",
-                    { minimumFractionDigits: 2, maximumFractionDigits: 2 }
-                  )}`
-                  : "R$ 0"}
-              </span>
+              <span>{!isLoading ? `R$ ${fmt2(collateralValue)}` : "R$ 0"}</span>
             </div>
             <div className="flex justify-between text-white">
               <span>DREX Borrowed:</span>
-              <span>
-                {!isLoading
-                  ? `${borrowedAmount.toLocaleString("en-US", {
-                    minimumFractionDigits: 2,
-                    maximumFractionDigits: 2,
-                  })}`
-                  : "0"}{" "}
-                DREX
-              </span>
+              <span>{!isLoading ? fmt2(borrowedAmount) : "0"} DREX</span>
             </div>
             <div className=" flex justify-between text-white">
               <span>Available Liquidity:</span>
-              <span>
-                {!isLoading
-                  ? `${(totalSupplied - totalBorrowed).toLocaleString("en-US", {
-                    minimumFractionDigits: 2,
-                    maximumFractionDigits: 2,
-                  })}`
-                  : "R$ 0"}{" "}
-                DREX
-              </span>
+              <span>{!isLoading ? fmt2(availableLiquidity) : "0"} DREX</span>
             </div>
           </div>
           <Button
             text="Borrow"
             onClick={writeBorrowDREX}
-            disabled={
-              borrowValue > totalSupplied - totalBorrowed ||
-              borrowValue >
-              ((depositedTSELIC * unitValue - borrowedAmount) * 99) / 100 ||
-              isLoadingTx
-            }
+            disabled={borrowAmount === 0n || borrowAmount > maxBorrow}
             isLoading={isLoadingBorrowDREX}
           />
         </div>
@@ -334,28 +175,20 @@ export const ContextBorrowDrex = ({
             <div className="flex h-full w-full flex-col items-start justify-start gap-1">
               <div className="inline-flex items-start justify-start gap-6">
                 <div className="text-base font-normal leading-normal text-gray-400">
-                  Balance:{" "}
-                  {!isLoading
-                    ? `${drexBalance.toLocaleString("en-US", {
-                      minimumFractionDigits: 2,
-                      maximumFractionDigits: 2,
-                    })}`
-                    : "0"}{" "}
-                  DREX
+                  Balance: {!isLoading ? fmt2(drexBalance) : "0"} DREX
                 </div>
               </div>
               <div className="border-brandBlue-300 inline-flex w-full items-center justify-between rounded-lg border border-opacity-20 bg-gray-700 px-3">
                 <input
                   type="number"
                   className="h-full min-w-[50px] border-none bg-transparent text-base font-normal leading-normal text-white shadow outline-none focus:border-transparent focus:outline-none focus:ring-0"
+                  placeholder={"0"}
                   value={repayValue}
                   onChange={(e) => {
-                    const enteredValue = Number(e.target.value);
-                    if (enteredValue > drexBalance) {
-                      setError("The amount entered is greater than the current balance.");
-                    } else {
-                      setError("");
-                      setRepayValue(enteredValue);
+                    setMaxRepay(false);
+                    setRepayValue(e.target.value);
+                    if (toUnits(e.target.value, 6) > drexBalanceUnits) {
+                      warn("The amount entered is greater than the current balance.");
                     }
                   }}
                   style={{
@@ -366,7 +199,10 @@ export const ContextBorrowDrex = ({
                 <div className="flex w-[130px] items-center justify-center gap-2.5 p-2">
                   <button
                     className="text-brandBlue-300 text-base font-normal leading-normal"
-                    onClick={() => setRepayValue(borrowedAmount)}
+                    onClick={() => {
+                      setMaxRepay(true);
+                      setRepayValue(unitsToInput(debtDrex, 6));
+                    }}
                   >
                     max
                   </button>
@@ -386,19 +222,11 @@ export const ContextBorrowDrex = ({
           <div className="flex h-full w-full flex-col gap-2">
             <div className="flex justify-between text-white">
               <span>Debt:</span>
-              <span>
-                {!isLoading
-                  ? `${borrowedAmount.toLocaleString("en-US", {
-                    minimumFractionDigits: 2,
-                    maximumFractionDigits: 2,
-                  })}`
-                  : "0"}{" "}
-                DREX
-              </span>
+              <span>{!isLoading ? fmt2(borrowedAmount) : "0"} DREX</span>
             </div>
           </div>
 
-          {allowanceDREX <= repayValue ? (
+          {allowance < repayAmount ? (
             <Button
               text="Approve"
               onClick={writeApproveDREX}
@@ -410,9 +238,9 @@ export const ContextBorrowDrex = ({
               onClick={writeRepayDREX}
               isLoading={isLoadingRepayDREX}
               disabled={
-                repayValue > drexBalance ||
-                repayValue > borrowedAmount ||
-                isLoadingTx
+                repayAmount === 0n ||
+                repayAmount > drexBalanceUnits ||
+                (!isMaxRepay && repayAmount * RBLL_PER_DREX > debt)
               }
             />
           )}
