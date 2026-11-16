@@ -33,6 +33,7 @@ import { BigNumberish } from "ethers";
 import { InfoHeaderSkeleton } from "@/components/Skeletons/InfoHeaderSkeleton";
 import { EthereumAddress } from "@/hooks/useErc20";
 import { useIsMobile } from "@/hooks/useIsMobile";
+import { appChain } from "@/connection";
 
 export default function HomePage() {
   const { onOpen: onOpenSD } = useStore(useLendingModalSupplyDrex);
@@ -47,7 +48,7 @@ export default function HomePage() {
   const { address } = useAccount();
   const { chain } = useNetwork();
   const { switchNetwork } = useSwitchNetwork();
-  const desiredChainId = 1440002;
+  const desiredChainId = appChain.id;
 
   useEffect(() => {
     if (chain?.id !== desiredChainId && switchNetwork) {

@@ -1,54 +1,25 @@
 import { createConfig, configureChains } from "wagmi"
 
+import { sepolia } from "wagmi/chains"
 import { publicProvider } from "wagmi/providers/public"
 
 import { InjectedConnector } from "wagmi/connectors/injected"
 import { MetaMaskConnector } from "wagmi/connectors/metaMask"
 import { WalletConnectConnector } from "wagmi/connectors/walletConnect"
 
-const mumbai = {
-  id: 80001,
-  network: "Mumbai",
-  name: "Mumbai",
-  nativeCurrency: { name: "MATIC", symbol: "MATIC", decimals: 18 },
-  blockExplorers: {
-    default: { name: "Mumbai", url: "https://mumbai.polygonscan.com/" },
-  },
+// viem's default Sepolia RPC (rpc.sepolia.org) is unreliable; use publicnode.
+const SEPOLIA_RPC = "https://ethereum-sepolia-rpc.publicnode.com"
+export const appChain = {
+  ...sepolia,
   rpcUrls: {
-    default: {
-      http: ["https://polygon-mumbai-bor.publicnode.com/"],
-      webSocket: ["wss://polygon-mumbai-bor.publicnode.com/"],
-    },
-    public: {
-      http: ["https://polygon-mumbai-bor.publicnode.com/"],
-      webSocket: ["wss://polygon-mumbai-bor.publicnode.com/"],
-    },
+    ...sepolia.rpcUrls,
+    default: { http: [SEPOLIA_RPC] },
+    public: { http: [SEPOLIA_RPC] },
   },
-  testnet: false,
 }
-const xrp = {
-  id: 1440002,
-  network: "Mumbai",
-  name: "XRPL EVM Sidechain",
-  nativeCurrency: { name: "XRP", symbol: "XRP", decimals: 18 },
-  blockExplorers: {
-    default: { name: "XRP", url: "https://evm-sidechain.xrpl.org/" },
-  },
-  rpcUrls: {
-    default: {
-      http: ["https://rpc-evm-sidechain.xrpl.org"],
-      webSocket: ["wss://rpc-evm-sidechain.xrpl.org"],
-    },
-    public: {
-      http: ["https://rpc-evm-sidechain.xrpl.org"],
-      webSocket: ["https://rpc-evm-sidechain.xrpl.org"],
-    },
-  },
-  testnet: false,
-} // TODO
 
 const { chains, publicClient, webSocketPublicClient } = configureChains(
-  [xrp],
+  [appChain],
   [publicProvider()],
 )
 
